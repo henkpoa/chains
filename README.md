@@ -83,9 +83,32 @@ Horizon fork of this addon; the implementation here is our own, and none of
 that fork's data is used - its skillchain properties are rebalanced for
 HorizonXI and disagree with retail on seventeen weapon skills.
 
-The two server-rules changes above do nothing on a retail-rules server: the
-Formless Fists effect id is never sent, and no other server hands a Red Mage
-Immanence.
+**Onslaught boss weakness.** When an Onslaught boss is engaged, the server's
+herald tells the party which element the boss is weak to and which
+skillchains carry it, as a chat line:
+
+    Hajwaj's aura wavers before fire! A Liquefaction, Fusion or Light skillchain will break it.
+
+The fork reads that line and, while the boss is targeted, shows the weakness
+at the top of the window. With no skillchain window open it lists what you
+alone can contribute: the weapon skills you can open with and the closer
+property a partner then needs, and the weapon skills you can close with and
+the opener property that must be standing. While a window is open, the
+results that break the weakness are listed first and marked, and the rest are
+greyed out - they are still real skillchains, just not the one the boss wants.
+The server's rule is applied as written: a landed chain breaks the weakness
+when it bursts on every announced element, so a Fusion or a Light answers a
+fire weakness. The proc lines ("Skillchain! +10 points") mark that credit as
+banked, and "The boss falls!" or a zone change clears the panel. A wipe does
+not: the server keeps the weakness through a re-engage, and so does the addon.
+
+`/chains weakness fire Liquefaction,Fusion,Light` sets a weakness on your
+current target by hand, for looking at the panel outside a run;
+`/chains weakness off` clears it.
+
+The three server-rules changes above do nothing on a retail-rules server: the
+Formless Fists effect id is never sent, no other server hands a Red Mage
+Immanence, and no other server's chat carries the herald's line.
 
 ## Acknowledgments
 All credit goes to Ivaar for the original skillchains implementation which was used as the tempalte for how to accomplish the desired results and how to deal with some of the corner cases.

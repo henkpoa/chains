@@ -22,12 +22,13 @@
 --[[
 * AscensionXI fork. Modified 2026-09-18 by the AscensionXI server project:
 * the addon is taught the two places where this server's skillchain rules
-* differ from retail. See "AscensionXI changes" in README.md.
+* differ from retail, and shows the Onslaught boss's announced weakness.
+* See "AscensionXI changes" in README.md.
 --]]
 
 addon.name     = 'chains';
 addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
-addon.version  = '1.0.1-axi1';
+addon.version  = '1.0.1-axi2';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -227,7 +228,35 @@ local axServer = {
     -- Main jobs that can hold Immanence: Scholar's own, and Red Mage, whose
     -- Spellchain reuses the effect.
     immanenceJobs = T{ 'SCH', 'RDM' },
+
+    -- Onslaught boss weakness. The herald announces it once per boss as a
+    -- chat line; these patterns are the contract with
+    -- modules/custom/lua/onslaught.lua (announceWeakness, announceProcCredit).
+    -- Chat colour bytes are stripped before matching, and the herald's
+    -- "[Ghelsba Herald] " prefix is cut from the boss capture.
+    weaknessLine   = "(.-)'s aura wavers before (.-)!",
+    weaknessChains = 'A (.-) skillchain will break it%.',
+    procLines = T{
+        { pattern = 'Skillchain! %+%d+ points',     proc = 'skillchain' },
+        { pattern = 'Magic burst! %+%d+ points',    proc = 'magicBurst' },
+        { pattern = 'The boss falls! %+%d+ points', proc = 'kill' },
+    },
+
+    -- The herald's lower-case element words, as the addon spells them.
+    elementWords = T{
+        fire = 'Fire', ice = 'Ice', wind = 'Wind', earth = 'Earth',
+        lightning = 'Lightning', water = 'Water', light = 'Light', dark = 'Dark',
+    },
 };
+
+-- The announced weakness of the boss this party is fighting, or nil.
+--   boss     the boss's name as the herald said it
+--   elements the announced elements, addon spelling ('Fire', 'Lightning', ...)
+--   chains   the chain names the herald listed
+--   procs    which of the once-per-boss procs the party has already earned
+-- Cleared when the boss falls or the player changes zone; a re-engage after
+-- a wipe keeps it, because the server keeps it too.
+local axWeakness = nil;
 
 local MessageTypes = T{
     2,   -- '<caster> casts <spell>. <target> takes <amount> damage'
@@ -594,6 +623,9 @@ local GetSkillchains = function(target)
                 local skillchain = {
                     outText = ('%-17s>> Lv.%d'):fmt(action.en, match.level),
                     outProp = match.skillchain,
+                    -- AscensionXI: whether this result breaks the Onslaught
+                    -- boss's announced weakness (only asked on that boss).
+                    answers = target.axBoss and axChainAnswers(match.skillchain) or false,
                 }
                 table.insert(levelTable[match.level],skillchain);
                 break;
@@ -601,10 +633,15 @@ local GetSkillchains = function(target)
         end
     end
 
-    -- Sort results to a single table based on skillchain level
-    for x=4,1,-1 do
-        for _,v in pairs(levelTable[x]) do
-            table.insert(chainTable,v);
+    -- Sort results to a single table based on skillchain level; on the
+    -- Onslaught boss the weakness-breaking results come first.
+    for _, wanted in pairs(target.axBoss and { true, false } or { false }) do
+        for x=4,1,-1 do
+            for _,v in pairs(levelTable[x]) do
+                if v.answers == wanted then
+                    table.insert(chainTable,v);
+                end
+            end
         end
     end
 
@@ -707,6 +744,258 @@ local function axIsFormlessWeaponskill(actor, actionPacket)
     end
 
     return true;
+end
+
+--=============================================================================
+-- AscensionXI: Onslaught boss weakness.
+--=============================================================================
+
+-- Chat lines carry colour and control bytes (0x1E/0x1F/0x7F plus one byte).
+local function axStripChat(s)
+    return (s:gsub('[\30\31\127].', ''):gsub('[\r\n]', ' '));
+end
+
+-- "fire, wind, lightning and light" / "Liquefaction, Fusion or Light" -> list
+local function axSplitList(s)
+    local out = T{};
+    s = s:gsub(' and ', ', '):gsub(' or ', ', ');
+    for word in s:gmatch('[^,]+') do
+        word = word:match('^%s*(.-)%s*$');
+        if #word > 0 then
+            out:append(word);
+        end
+    end
+    return out;
+end
+
+-- The name a chain result is displayed and looked up under. The server folds
+-- "Light II" and "Darkness II" into their level-3 names for the announcement,
+-- and this table only knows the level-3 names anyway.
+local function axChainKey(name)
+    return name:gsub(' II$', '');
+end
+
+-- The server's rule: a landed chain breaks the weakness when every announced
+-- element is one the landed chain bursts on.
+local function axChainAnswers(resultName)
+    if axWeakness == nil then
+        return false;
+    end
+
+    local info = chainInfo[axChainKey(resultName)];
+    if info == nil then
+        return false;
+    end
+
+    -- The table spells Compression's element 'Darkness'; the herald says dark.
+    local bursts = T{};
+    for _, element in pairs(info.burst) do
+        bursts:append(element == 'Darkness' and 'Dark' or element);
+    end
+    for _, element in pairs(axWeakness.elements) do
+        if not bursts:contains(element) then
+            return false;
+        end
+    end
+
+    return true;
+end
+
+local function axSetWeakness(boss, elements, chainList)
+    axWeakness = {
+        boss     = boss,
+        elements = elements,
+        chains   = chainList,
+        procs    = T{},
+    };
+
+    if chains.debug then
+        print(chat.header(addon.name):append(chat.message(('weakness: %s -> %s [%s]'):fmt(
+            boss, elements:concat(', '), chainList:concat(', ')))));
+    end
+end
+
+-- Read the herald's line. Returns true when it was a weakness announcement.
+local function axParseWeakness(message)
+    local boss, elementText = message:match(axServer.weaknessLine);
+    if boss == nil then
+        return false;
+    end
+
+    -- Cut the "[Ghelsba Herald] " the client prints before a named line.
+    boss = boss:gsub('^.*[%]:]%s*', '');
+
+    local elements = T{};
+    local chainList = T{};
+
+    local chainText = message:match(axServer.weaknessChains);
+    if chainText then
+        for _, word in pairs(axSplitList(elementText)) do
+            elements:append(axServer.elementWords[word:lower()] or word);
+        end
+        chainList = axSplitList(chainText);
+    elseif chainInfo[axChainKey(elementText)] then
+        -- The older one-name shape names the chain itself; its burst elements
+        -- are the weakness.
+        elements = T(chainInfo[axChainKey(elementText)].burst);
+        chainList = T{ elementText };
+    else
+        return false;
+    end
+
+    if #elements == 0 then
+        return false;
+    end
+
+    axSetWeakness(boss, elements, chainList);
+    return true;
+end
+
+-- True while the player targets the boss the weakness belongs to.
+local function axTargetIsBoss()
+    if axWeakness == nil then
+        return false;
+    end
+
+    local index = AshitaCore:GetMemoryManager():GetTarget():GetTargetIndex(0);
+    if index == nil or index == 0 then
+        return false;
+    end
+
+    local name = AshitaCore:GetMemoryManager():GetEntity():GetName(index);
+    return name ~= nil and name:lower() == axWeakness.boss:lower();
+end
+
+-- Every property a chain can be continued with, from chainInfo's shape:
+-- the property keys sit beside 'level', 'burst' and 'aeonic'.
+local function axClosingProperties(openProperty)
+    local out = T{};
+    for key, _ in pairs(chainInfo[openProperty] or {}) do
+        if SkillPropNames:contains(key) then
+            out:append(key);
+        end
+    end
+    return out;
+end
+
+-- What the player alone can contribute to a weakness-breaking chain, for the
+-- panel shown before any window is open:
+--   openers: my weapon skill, the result, and the closer property a partner
+--            needs to bring;
+--   closers: my weapon skill, the result, and the opener property a partner
+--            must have left standing.
+local function axSuggestions()
+    local openers = T{};
+    local closers = T{};
+
+    if not actionTable.wepskill then
+        actionTable.wepskill = GetWeaponskills();
+    end
+
+    for _, action in pairs(actionTable.wepskill) do
+        local mine = GetAeonicProperty(action, playerID);
+
+        -- As opener: my property p1 stands; a partner's p2 closes it.
+        local opens = T{};
+        for _, p1 in pairs(mine) do
+            for _, p2 in pairs(axClosingProperties(p1)) do
+                local result = chainInfo[p1][p2].skillchain;
+                if axChainAnswers(result) then
+                    opens[result] = opens[result] or T{};
+                    if not opens[result]:contains(p2) then
+                        opens[result]:append(p2);
+                    end
+                end
+            end
+        end
+        for result, needs in pairs(opens) do
+            openers:append({ en = action.en, result = result, partner = needs });
+        end
+
+        -- As closer: a partner's p1 stands; the ordered walk over my
+        -- properties takes the first that continues it, so only that one
+        -- counts, exactly as GetSkillchains resolves a live window.
+        local closes = T{};
+        for p1, _ in pairs(chainInfo) do
+            for _, p2 in pairs(mine) do
+                local match = chainInfo[p1][p2];
+                if match then
+                    if axChainAnswers(match.skillchain) then
+                        closes[match.skillchain] = closes[match.skillchain] or T{};
+                        if not closes[match.skillchain]:contains(p1) then
+                            closes[match.skillchain]:append(p1);
+                        end
+                    end
+                    break;
+                end
+            end
+        end
+        for result, after in pairs(closes) do
+            closers:append({ en = action.en, result = result, partner = after });
+        end
+    end
+
+    local byLevel = function(a, b)
+        local la, lb = chainInfo[axChainKey(a.result)].level, chainInfo[axChainKey(b.result)].level;
+        if la ~= lb then
+            return la > lb;
+        end
+        return a.en < b.en;
+    end
+    table.sort(openers, byLevel);
+    table.sort(closers, byLevel);
+
+    return openers, closers;
+end
+
+-- Draws one suggestion line: "Raging Fists      >> Liquefaction  (Scission, Impaction)"
+local function axDrawSuggestion(entry, joiner)
+    imgui.Text(('%-17s>> '):fmt(entry.en));
+    imgui.SameLine(0, 0);
+    imgui.TextColored(GetPropertyColor(entry.result), entry.result);
+    imgui.SameLine();
+    imgui.Text(('(%s '):fmt(joiner));
+    for k, property in pairs(entry.partner) do
+        if k > 1 then
+            imgui.SameLine(0, 0);
+            imgui.Text(',');
+        end
+        imgui.SameLine(0, k > 1 and 4 or 0);
+        imgui.TextColored(GetPropertyColor(property), property);
+    end
+    imgui.SameLine(0, 0);
+    imgui.Text(')');
+end
+
+-- The weakness header: boss, elements, the chains that break it, and which
+-- procs are already banked.
+local function axDrawWeaknessHeader()
+    imgui.Text(('%s wavers before'):fmt(axWeakness.boss));
+    for k, element in pairs(axWeakness.elements) do
+        if k > 1 then
+            imgui.SameLine(0, 0);
+            imgui.Text(',');
+        end
+        imgui.SameLine();
+        imgui.TextColored(GetPropertyColor(element), element);
+    end
+
+    imgui.Text('Breaks it: ');
+    for k, name in pairs(axWeakness.chains) do
+        if k > 1 then
+            imgui.SameLine(0, 0);
+            imgui.Text(',');
+        end
+        imgui.SameLine();
+        imgui.TextColored(GetPropertyColor(axChainKey(name)), name);
+    end
+
+    local banked = T{};
+    if axWeakness.procs.skillchain then banked:append('skillchain'); end
+    if axWeakness.procs.magicBurst then banked:append('magic burst'); end
+    if #banked > 0 then
+        imgui.TextDisabled(('Banked: %s'):fmt(banked:concat(', ')));
+    end
 end
 
 --=============================================================================
@@ -980,6 +1269,10 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             playerTable[actor][targetAction.Param] = os.time() + ChainBuffTypes[targetAction.Param].duration;
         end
 
+    -- AscensionXI: a zone change ends any Onslaught boss fight.
+    elseif e.id == 0x0A then
+        axWeakness = nil;
+
     -- Action Message - Clear buff when getting '206 - ${target}'s ${status} effect wears off'.
     --  only works to clear local player
     elseif e.id == 0x29 and struct.unpack('H', e.data, 0x18+1) == 206 and struct.unpack('I', e.data, 8+1) == playerID then
@@ -1041,6 +1334,33 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
 end);
 
 --=============================================================================
+-- event: text_in
+-- desc: AscensionXI - the Onslaught herald's weakness and proc lines.
+--=============================================================================
+ashita.events.register('text_in', 'text_in_cb', function (e)
+    local message = axStripChat(e.message);
+
+    if axParseWeakness(message) then
+        return;
+    end
+
+    if axWeakness == nil then
+        return;
+    end
+
+    for _, line in pairs(axServer.procLines) do
+        if message:find(line.pattern) then
+            if line.proc == 'kill' then
+                axWeakness = nil;
+            else
+                axWeakness.procs[line.proc] = true;
+            end
+            return;
+        end
+    end
+end);
+
+--=============================================================================
 -- event: d3d_present
 -- desc: Event called when the Direct3D device is presenting a scene.
 --=============================================================================
@@ -1072,7 +1392,11 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     local targetId = AshitaCore:GetMemoryManager():GetTarget():GetServerId(0);
     local render = targetId ~= nil and targetTable[targetId] and targetTable[targetId].dur-(now-targetTable[targetId].ts) > 0;
 
-    if render or chains.visible or chains.position then
+    -- AscensionXI: the Onslaught boss gets its weakness panel while
+    -- targeted, window or no window.
+    local bossTargeted = axTargetIsBoss();
+
+    if render or bossTargeted or chains.visible or chains.position then
 
         local flags = bit.bor(
             ImGuiWindowFlags_NoDecoration,
@@ -1097,7 +1421,13 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
         if (imgui.Begin('chains', true, flags)) then
 
+            if bossTargeted then
+                axDrawWeaknessHeader();
+                imgui.Separator();
+            end
+
             if render then
+                targetTable[targetId].axBoss = bossTargeted;
                 local timediff = now-targetTable[targetId].ts;
                 local timer = targetTable[targetId].dur-timediff;
 
@@ -1156,9 +1486,40 @@ ashita.events.register('d3d_present', 'present_cb', function ()
                     --    targetTable[targetId].skillchains = skillchains;
                     --end
                     for _,v in pairs(skillchains) do
-                        imgui.Text(v.outText);
-                        imgui.SameLine();
-                        imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
+                        if bossTargeted and not v.answers then
+                            -- Still a real chain, just not the one the boss
+                            -- wants.
+                            imgui.TextDisabled(v.outText);
+                            imgui.SameLine();
+                            imgui.TextDisabled(v.outProp);
+                        else
+                            imgui.Text(v.outText);
+                            imgui.SameLine();
+                            imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
+                            if v.answers then
+                                imgui.SameLine();
+                                imgui.Text('<< breaks it');
+                            end
+                        end
+                    end
+                end
+            elseif bossTargeted then
+                -- No window standing: what the player can open or close
+                -- toward the weakness, and what a partner must bring.
+                local openers, closers = axSuggestions();
+                if #openers == 0 and #closers == 0 then
+                    imgui.TextDisabled('None of your weapon skills can take part.');
+                end
+                if #openers > 0 then
+                    imgui.Text('You open:');
+                    for _, entry in pairs(openers) do
+                        axDrawSuggestion(entry, 'closer:');
+                    end
+                end
+                if #closers > 0 then
+                    imgui.Text('You close:');
+                    for _, entry in pairs(closers) do
+                        axDrawSuggestion(entry, 'after:');
                     end
                 end
             elseif chains.visible then
@@ -1208,6 +1569,30 @@ ashita.events.register('command', 'command_cb', function (e)
     if (#args == 2) and (args[2] == 'debug') then
         chains.debug = not chains.debug;
         print(chat.header(addon.name):append(chat.message('%s: %s'):fmt(args[2], chains.debug and 'on' or 'off')));
+    end
+
+    --========================================================================
+    -- AscensionXI: set or clear a boss weakness by hand, for testing the
+    -- panel outside a run. The boss is whatever is targeted.
+    --   /chains weakness fire Liquefaction,Fusion,Light
+    --   /chains weakness off
+    --========================================================================
+    if (#args == 3) and (args[2] == 'weakness') and (args[3] == 'off') then
+        axWeakness = nil;
+        print(chat.header(addon.name):append(chat.message('Weakness cleared')));
+    elseif (#args >= 3) and (args[2] == 'weakness') then
+        local index = AshitaCore:GetMemoryManager():GetTarget():GetTargetIndex(0);
+        local boss = index and index ~= 0 and AshitaCore:GetMemoryManager():GetEntity():GetName(index) or nil;
+        if boss == nil then
+            print(chat.header(addon.name):append(chat.error('Target the boss first.')));
+        else
+            local elements = T{};
+            for _, word in pairs(axSplitList(args[3])) do
+                elements:append(axServer.elementWords[word:lower()] or word);
+            end
+            axSetWeakness(boss, elements, args[4] and axSplitList(args[4]) or T{});
+            print(chat.header(addon.name):append(chat.message('Weakness set on %s: %s'):fmt(boss, elements:concat(', '))));
+        end
     end
 
     --========================================================================
