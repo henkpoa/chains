@@ -19,9 +19,15 @@
 * along with Ashita.  If not, see <https://www.gnu.org/licenses/>.
 --]]
 
+--[[
+* AscensionXI fork. Modified 2026-09-18 by the AscensionXI server project:
+* the addon is taught the two places where this server's skillchain rules
+* differ from retail. See "AscensionXI changes" in README.md.
+--]]
+
 addon.name     = 'chains';
-addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d';
-addon.version  = '1.0.1';
+addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
+addon.version  = '1.0.1-axi1';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -184,6 +190,27 @@ local statusID = {
     IM  = 470  -- Immanence
 };
 
+--=============================================================================
+-- AscensionXI server rules.
+--
+-- The server names the armed player to every client in range: a job ability's
+-- action packet carries the status effect id its script returned, which is how
+-- Immanence and Chain Affinity are already tracked above.
+--=============================================================================
+local axServer = {
+    formlessFists   = 818, -- Monk's Formless Fists, as the action packet carries it
+    formlessIcon    = 532, -- the same effect on the buff bar, for the local player
+    formlessSeconds = 60,  -- how long the server lets the flag stand
+
+    -- The nine hand-to-hand weapon skills Formless Fists can flag. Any other
+    -- weapon skill leaves the flag standing, as it does on the server.
+    formlessWeaponskills = T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+
+    -- Main jobs that can hold Immanence: Scholar's own, and Red Mage, whose
+    -- Spellchain reuses the effect.
+    immanenceJobs = T{ 'SCH', 'RDM' },
+};
+
 local MessageTypes = T{
     2,   -- '<caster> casts <spell>. <target> takes <amount> damage'
   --100, -- 'The <player> uses ..' -- Causes Super Jump to match as Spinning Axe if enabled
@@ -205,7 +232,8 @@ local PetMessageTypes = T{
 local ChainBuffTypes = T{
     [statusID.AL] = { duration = 30 }, -- 40 with relic hands
     [statusID.CA] = { duration = 30 },
-    [statusID.IM] = { duration = 60 }
+    [statusID.IM] = { duration = 60 },
+    [axServer.formlessFists] = { duration = axServer.formlessSeconds }
 };
 
 local EquipSlotNames = T{
@@ -478,8 +506,11 @@ local GetSkillchains = function(target)
     local levelTable = T{{},{},{},{}};
 
     local mainJob = GetPlayer().MainJob;
-    local enableSCH = mainJob == 'SCH' and ((playerTable[playerID] and playerTable[playerID][statusID.IM]) or
-                                            chains.forceImmanence);
+    -- AscensionXI: Red Mage's Spellchain reuses the Immanence effect, so a
+    -- Red Mage main holding it gets the same element list a Scholar does.
+    local enableImmanence = axServer.immanenceJobs:contains(mainJob) and
+                            ((playerTable[playerID] and playerTable[playerID][statusID.IM]) or
+                             chains.forceImmanence);
     local enableBLU = mainJob == 'BLU' and ((playerTable[playerID] and playerTable[playerID][statusID.AL]) or
                                             (playerTable[playerID] and playerTable[playerID][statusID.CA]) or
                                             chains.forceAffinity);
@@ -512,7 +543,7 @@ local GetSkillchains = function(target)
         actions = actions:extend(actionTable.petskill);
     elseif chains.settings.display.spell and enableBLU and actionTable.bluskill then
         actions = actions:extend(actionTable.bluskill);
-    elseif chains.settings.display.spell and enableSCH and actionTable.schskill then
+    elseif chains.settings.display.spell and enableImmanence and actionTable.schskill then
         actions = actions:extend(actionTable.schskill);
     end
 
@@ -609,6 +640,55 @@ local function isPetInAlliance(id)
     end
 
     return false
+end
+
+--=============================================================================
+-- AscensionXI: true when the actor holds a buff that lets a spell open a
+-- skillchain. The buff table also holds Formless Fists, which does nothing
+-- for spells, so the spell branch asks this instead of "any tracked buff".
+---@param actor number ServerId
+---@return boolean
+--=============================================================================
+local function axHasSpellBuff(actor)
+    local buffs = playerTable[actor];
+
+    return buffs ~= nil and (buffs[statusID.AL] or buffs[statusID.CA] or buffs[statusID.IM]) ~= nil;
+end
+
+--=============================================================================
+-- AscensionXI: spend the Formless Fists flag on the weapon skill it flagged,
+-- and say so. Such a weapon skill forms no skillchain, yet its packet is
+-- identical to an ordinary one - the flag is the only thing telling them
+-- apart - so the caller must neither open a window nor disturb the one
+-- standing. The server spends the flag whether the hits land or not, so this
+-- does too.
+---@param actor number ServerId of the player who acted
+---@param actionPacket table Parsed action packet
+---@return boolean formless
+--=============================================================================
+local function axIsFormlessWeaponskill(actor, actionPacket)
+    if actionPacket.Type ~= 3 or
+       not axServer.formlessWeaponskills:contains(bit.band(actionPacket.Id, 0xFFFF)) then
+        return false;
+    end
+
+    local armed = playerTable[actor] ~= nil and playerTable[actor][axServer.formlessFists] ~= nil;
+
+    -- The local player's buff bar answers for a flag this addon never saw
+    -- armed: loaded mid-fight, or zoned while holding it.
+    if not armed and actor == playerID then
+        armed = GetBuffCount(axServer.formlessIcon) > 0;
+    end
+
+    if not armed then
+        return false;
+    end
+
+    if playerTable[actor] then
+        playerTable[actor][axServer.formlessFists] = nil;
+    end
+
+    return true;
 end
 
 --=============================================================================
@@ -812,6 +892,12 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             return;
         end
 
+        -- AscensionXI: a weapon skill flagged by Formless Fists neither opens
+        -- nor closes a skillchain, so leave every window as it stands.
+        if axIsFormlessWeaponskill(actor, actionPacket) then
+            return;
+        end
+
         -- Check for valid action skill with valid added effect propery - after first setp
         if actionSkill and effectProperty then
             local step = (targetTable[target.Id] and targetTable[target.Id].step or 1) + 1
@@ -837,7 +923,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         -- Check for valid actor skill with valid message - generic first step (excluding chainbound)
         -- Include spells when SCH Immanence or BLU Azure Lore / Chain Affinity is active
         -- Immanence and Chain Affinity buff status cleared on use
-        elseif actionSkill and MessageTypes:contains(targetAction.Message) and (actionPacket.Type ~= 4 or (playerTable[actor])) then
+        elseif actionSkill and MessageTypes:contains(targetAction.Message) and (actionPacket.Type ~= 4 or axHasSpellBuff(actor)) then
             local delay = actionSkill and actionSkill.delay or 3
             targetTable[target.Id] = {
                 en=actionSkill.en,

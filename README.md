@@ -51,6 +51,32 @@ The following commands toggle the display information.
 - Cannot detect when another player cancels their spell abilities
 - Aeonic testing is limited due to lack of weapon to test with
 
+## AscensionXI changes
+
+This is the AscensionXI server's fork of MultiFr3d's chains. The upstream
+addon assumes retail skillchain rules; AscensionXI deviates in two places,
+and each would otherwise show the player something untrue.
+
+**Formless Fists (Monk).** On AscensionXI a Monk's Formless Fists flags the
+next hand-to-hand weapon skill: it stores a mantra and forms no skillchain.
+The server drops the skillchain properties from that one use, and the action
+packet is byte for byte an ordinary weapon skill, so unpatched chains opens a
+skillchain window that does not exist - and, worse, treats the weapon skill as
+a fresh opener when a real window was already standing. The fork watches for
+the effect on the job ability's action packet, the same way it already watches
+Immanence and Chain Affinity, and when the flagged weapon skill lands it
+leaves every window untouched. This covers anyone in your alliance, not just
+you. The buff bar is a fallback for your own flag if the addon was loaded
+after you armed it.
+
+**Spellchain (Red Mage).** AscensionXI gives Red Mage a Spellchain ability
+that reuses the Immanence effect, so a Red Mage main holding it now gets the
+element list that was previously shown to Scholars only.
+
+Nothing else is changed, and neither change does anything on a retail-rules
+server: the Formless Fists effect id is never sent, and no other server hands
+a Red Mage Immanence.
+
 ## Acknowledgments
 All credit goes to Ivaar for the original skillchains implementation which was used as the tempalte for how to accomplish the desired results and how to deal with some of the corner cases.
 
