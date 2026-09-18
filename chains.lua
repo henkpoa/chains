@@ -28,7 +28,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
-addon.version  = '1.0.1-axi3';
+addon.version  = '1.0.1-axi4';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -64,6 +64,10 @@ local default_settings = T{
     position_x = 100,
     position_y = 100,
     font_scale = 1.0,
+    -- AscensionXI: the Onslaught weakness window, separate from the chain
+    -- window so neither reshapes the other. Drag it where you want it.
+    onslaught_x = 100,
+    onslaught_y = 300,
     display = T{
         color = true,
         pet = true,
@@ -1522,7 +1526,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     -- targeted, window or no window.
     local bossTargeted = axTargetIsBoss();
 
-    if render or bossTargeted or chains.visible or chains.position then
+    if render or chains.visible or chains.position then
 
         local flags = bit.bor(
             ImGuiWindowFlags_NoDecoration,
@@ -1546,11 +1550,6 @@ ashita.events.register('d3d_present', 'present_cb', function ()
         end
 
         if (imgui.Begin('chains', true, flags)) then
-
-            if bossTargeted then
-                axDrawWeaknessHeader();
-                imgui.Separator();
-            end
 
             if render then
                 targetTable[targetId].axBoss = bossTargeted;
@@ -1629,9 +1628,46 @@ ashita.events.register('d3d_present', 'present_cb', function ()
                         end
                     end
                 end
-            elseif bossTargeted and #axWeakness.roster > 0 then
-                -- No window standing: who opens with what, who closes with
-                -- what, from the weapon skills the herald listed per member.
+            elseif chains.visible then
+                imgui.Text('');
+                imgui.Text('                 --- Chains ---                 ');
+                imgui.Text('         Click and drag to move display         ');
+                imgui.Text('');
+            end
+
+            if chains.position then
+                chains.position = nil;
+            end
+
+            -- store current window position
+            chains.settings.position_x, chains.settings.position_y = imgui.GetWindowPos();
+        end
+        imgui.End();
+        PopScaledFont();
+    end
+
+    -- AscensionXI: the Onslaught weakness window. Its own window, so the
+    -- chain window above keeps its shape while a boss is targeted.
+    if bossTargeted then
+        local flags = bit.bor(
+            ImGuiWindowFlags_NoDecoration,
+            ImGuiWindowFlags_AlwaysAutoResize,
+            ImGuiWindowFlags_NoSavedSettings,
+            ImGuiWindowFlags_NoFocusOnAppearing,
+            ImGuiWindowFlags_NoNav)
+
+        imgui.SetNextWindowBgAlpha(0.8)
+        PushScaledFont(chains.settings.font_scale);
+        imgui.SetNextWindowSizeConstraints({ 350 * chains.settings.font_scale, -1 }, { FLT_MAX, FLT_MAX })
+        imgui.SetNextWindowPos({ chains.settings.onslaught_x, chains.settings.onslaught_y }, ImGuiCond_Appearing, { 0, 0 });
+
+        if (imgui.Begin('chains_onslaught', true, flags)) then
+            axDrawWeaknessHeader();
+            imgui.Separator();
+
+            if #axWeakness.roster > 0 then
+                -- Who opens with what, who closes with what, from the weapon
+                -- skills the herald listed per member.
                 local pairings = axPairings();
                 if #pairings == 0 then
                     imgui.TextDisabled('No two listed weapon skills form a breaking chain.');
@@ -1645,7 +1681,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
                     axDrawPairing(entry);
                     shown = shown + 1;
                 end
-            elseif bossTargeted then
+            else
                 -- The herald's roster lines never arrived (addon loaded after
                 -- the engage): what the player alone can open or close
                 -- toward the weakness, and what a partner must bring.
@@ -1665,19 +1701,9 @@ ashita.events.register('d3d_present', 'present_cb', function ()
                         axDrawSuggestion(entry, 'after:');
                     end
                 end
-            elseif chains.visible then
-                imgui.Text('');
-                imgui.Text('                 --- Chains ---                 ');
-                imgui.Text('         Click and drag to move display         ');
-                imgui.Text('');
             end
 
-            if chains.position then
-                chains.position = nil;
-            end
-
-            -- store current window position
-            chains.settings.position_x, chains.settings.position_y = imgui.GetWindowPos();
+            chains.settings.onslaught_x, chains.settings.onslaught_y = imgui.GetWindowPos();
         end
         imgui.End();
         PopScaledFont();

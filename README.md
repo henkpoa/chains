@@ -95,9 +95,9 @@ on the roster):
 
     Abraxis can bring: Combo, Raging Fists, Spinning Attack.
 
-The fork reads those lines and, while the boss is targeted, shows the weakness
-at the top of the window and, with no skillchain window open, who opens with
-what and who closes with what to break it:
+The fork reads those lines and, while the boss is targeted, opens a second
+window of its own (drag it where you want it; the position is saved) with
+the weakness and who opens with what and who closes with what to break it:
 
     Fallen: Wasp Sting  >  Abraxis: Raging Fists  =  Liquefaction
 
@@ -106,9 +106,10 @@ self-chains; higher chains first within each. If the roster lines never
 arrived (the addon was loaded after the boss was engaged) it falls back to
 what you alone can contribute: the weapon skills you can open with and the
 closer property a partner then needs, and the ones you can close with and the
-opener property that must be standing. While a window is open, the results
-that break the weakness are listed first and marked, and the rest are greyed
-out - they are still real skillchains, just not the one the boss wants.
+opener property that must be standing. The ordinary chains window is
+unchanged except that, on the boss, the results that break the weakness are
+listed first and marked, and the rest are greyed out - they are still real
+skillchains, just not the one the boss wants.
 The server's rule is applied as written: a landed chain breaks the weakness
 when it bursts on every announced element, so a Fusion or a Light answers a
 fire weakness. The proc lines ("Skillchain! +10 points") mark that credit as
