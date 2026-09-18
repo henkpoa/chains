@@ -28,7 +28,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
-addon.version  = '1.0.1-axi4';
+addon.version  = '1.0.1-axi5';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -250,7 +250,7 @@ local axServer = {
     -- skills the server computed they can use at the synced level:
     --   "Abraxis can bring: Combo, Raging Fists, Spinning Attack."
     -- Trusts are never listed; the roster is players only.
-    rosterLine = '(.-) can bring: (.-)%.$',
+    rosterLine = '(.-) can bring: (.-)%.',
 
     -- The herald's lower-case element words, as the addon spells them.
     elementWords = T{
