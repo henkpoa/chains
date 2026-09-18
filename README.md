@@ -89,13 +89,26 @@ skillchains carry it, as a chat line:
 
     Hajwaj's aura wavers before fire! A Liquefaction, Fusion or Light skillchain will break it.
 
-The fork reads that line and, while the boss is targeted, shows the weakness
-at the top of the window. With no skillchain window open it lists what you
-alone can contribute: the weapon skills you can open with and the closer
-property a partner then needs, and the weapon skills you can close with and
-the opener property that must be standing. While a window is open, the
-results that break the weakness are listed first and marked, and the rest are
-greyed out - they are still real skillchains, just not the one the boss wants.
+followed by one line per party member present, listing the weapon skills the
+server credited them with at the synced level (players only - trusts are never
+on the roster):
+
+    Abraxis can bring: Combo, Raging Fists, Spinning Attack.
+
+The fork reads those lines and, while the boss is targeted, shows the weakness
+at the top of the window and, with no skillchain window open, who opens with
+what and who closes with what to break it:
+
+    Fallen: Wasp Sting  >  Abraxis: Raging Fists  =  Liquefaction
+
+Pairs you are part of come first, then pairs between two others, then
+self-chains; higher chains first within each. If the roster lines never
+arrived (the addon was loaded after the boss was engaged) it falls back to
+what you alone can contribute: the weapon skills you can open with and the
+closer property a partner then needs, and the ones you can close with and the
+opener property that must be standing. While a window is open, the results
+that break the weakness are listed first and marked, and the rest are greyed
+out - they are still real skillchains, just not the one the boss wants.
 The server's rule is applied as written: a landed chain breaks the weakness
 when it bursts on every announced element, so a Fusion or a Light answers a
 fire weakness. The proc lines ("Skillchain! +10 points") mark that credit as
@@ -108,7 +121,7 @@ current target by hand, for looking at the panel outside a run;
 
 The three server-rules changes above do nothing on a retail-rules server: the
 Formless Fists effect id is never sent, no other server hands a Red Mage
-Immanence, and no other server's chat carries the herald's line.
+Immanence, and no other server's chat carries the herald's lines.
 
 ## Acknowledgments
 All credit goes to Ivaar for the original skillchains implementation which was used as the tempalte for how to accomplish the desired results and how to deal with some of the corner cases.

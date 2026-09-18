@@ -28,7 +28,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
-addon.version  = '1.0.1-axi2';
+addon.version  = '1.0.1-axi3';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -242,6 +242,12 @@ local axServer = {
         { pattern = 'The boss falls! %+%d+ points', proc = 'kill' },
     },
 
+    -- After the weakness, one line per present roster member with the weapon
+    -- skills the server computed they can use at the synced level:
+    --   "Abraxis can bring: Combo, Raging Fists, Spinning Attack."
+    -- Trusts are never listed; the roster is players only.
+    rosterLine = '(.-) can bring: (.-)%.$',
+
     -- The herald's lower-case element words, as the addon spells them.
     elementWords = T{
         fire = 'Fire', ice = 'Ice', wind = 'Wind', earth = 'Earth',
@@ -254,9 +260,16 @@ local axServer = {
 --   elements the announced elements, addon spelling ('Fire', 'Lightning', ...)
 --   chains   the chain names the herald listed
 --   procs    which of the once-per-boss procs the party has already earned
+--   roster   { { name = 'Abraxis', skills = T{ <skills[3] entries> } }, ... }
+--            in the order the herald listed them; empty until the lines come
 -- Cleared when the boss falls or the player changes zone; a re-engage after
 -- a wipe keeps it, because the server keeps it too.
 local axWeakness = nil;
+
+-- Defined with the other Onslaught helpers further down; declared here
+-- because GetSkillchains calls it. A plain `local function` there would
+-- leave this a global lookup that fails the first time a window opens.
+local axChainAnswers;
 
 local MessageTypes = T{
     2,   -- '<caster> casts <spell>. <target> takes <amount> damage'
@@ -777,7 +790,7 @@ end
 
 -- The server's rule: a landed chain breaks the weakness when every announced
 -- element is one the landed chain bursts on.
-local function axChainAnswers(resultName)
+axChainAnswers = function(resultName)
     if axWeakness == nil then
         return false;
     end
@@ -807,6 +820,7 @@ local function axSetWeakness(boss, elements, chainList)
         elements = elements,
         chains   = chainList,
         procs    = T{},
+        roster   = T{},
     };
 
     if chains.debug then
@@ -849,6 +863,118 @@ local function axParseWeakness(message)
 
     axSetWeakness(boss, elements, chainList);
     return true;
+end
+
+-- skills[3] entry by name, spelling-insensitive: the herald prints the
+-- server's row name ("Ascetic's Fury" from ascetics_fury), the table has
+-- the client's.
+local axSkillByName = nil;
+local function axFindSkill(name)
+    if axSkillByName == nil then
+        axSkillByName = {};
+        for id, entry in pairs(skills[3]) do
+            axSkillByName[entry.en:lower():gsub('[^%a]', '')] = entry;
+        end
+    end
+    return axSkillByName[name:lower():gsub('[^%a]', '')];
+end
+
+-- Read a "<name> can bring: A, B, C." line. Returns true when it was one.
+-- Lines for a member already listed replace that member's skills.
+local function axParseRoster(message)
+    if axWeakness == nil then
+        return false;
+    end
+
+    local name, list = message:match(axServer.rosterLine);
+    if name == nil then
+        return false;
+    end
+
+    name = name:gsub('^.*[%]:]%s*', '');
+
+    local found = T{};
+    if list ~= 'nothing' then
+        for _, word in pairs(axSplitList(list)) do
+            local entry = axFindSkill(word);
+            if entry then
+                found:append(entry);
+            elseif chains.debug then
+                print(chat.header(addon.name):append(chat.error(('roster: unknown weapon skill "%s"'):fmt(word))));
+            end
+        end
+    end
+
+    for _, member in pairs(axWeakness.roster) do
+        if member.name == name then
+            member.skills = found;
+            return true;
+        end
+    end
+
+    axWeakness.roster:append({ name = name, skills = found });
+    return true;
+end
+
+-- Every (opener member, closer member, result) that breaks the weakness,
+-- one representative weapon-skill pair each. Pairs the local player is in
+-- come first, then pairs between two others, then self-chains; within a
+-- group the higher result first.
+local function axPairings()
+    local me = GetPlayer().Name;
+    local out = T{};
+    local seen = T{};
+
+    for _, opener in pairs(axWeakness.roster) do
+        for _, closer in pairs(axWeakness.roster) do
+            for _, openSkill in pairs(opener.skills) do
+                for _, closeSkill in pairs(closer.skills) do
+                    -- The engine's walk: opener's properties in order against
+                    -- the closer's, first match wins.
+                    local match = nil;
+                    for _, p1 in pairs(openSkill.skillchain) do
+                        for _, p2 in pairs(closeSkill.skillchain) do
+                            match = chainInfo[p1] and chainInfo[p1][p2];
+                            if match then break end
+                        end
+                        if match then break end
+                    end
+
+                    if match and axChainAnswers(match.skillchain) then
+                        local key = opener.name .. '|' .. closer.name .. '|' .. match.skillchain;
+                        if not seen[key] then
+                            seen[key] = true;
+                            local group = 3;
+                            if opener.name ~= closer.name then
+                                group = (opener.name == me or closer.name == me) and 1 or 2;
+                            end
+                            out:append({
+                                opener = opener.name, openSkill = openSkill.en,
+                                closer = closer.name, closeSkill = closeSkill.en,
+                                result = match.skillchain, level = match.level, group = group,
+                            });
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(out, function(a, b)
+        if a.group ~= b.group then return a.group < b.group end
+        if a.level ~= b.level then return a.level > b.level end
+        if a.opener ~= b.opener then return a.opener < b.opener end
+        return a.closer < b.closer;
+    end);
+
+    return out;
+end
+
+-- "Fallen: Wasp Sting  >  Abraxis: Raging Fists  =  Liquefaction"
+local function axDrawPairing(entry)
+    imgui.Text(('%s: %s  >  %s: %s  ='):fmt(entry.opener, entry.openSkill, entry.closer, entry.closeSkill));
+    imgui.SameLine();
+    imgui.TextColored(GetPropertyColor(entry.result), entry.result);
 end
 
 -- True while the player targets the boss the weakness belongs to.
@@ -1340,7 +1466,7 @@ end);
 ashita.events.register('text_in', 'text_in_cb', function (e)
     local message = axStripChat(e.message);
 
-    if axParseWeakness(message) then
+    if axParseWeakness(message) or axParseRoster(message) then
         return;
     end
 
@@ -1503,8 +1629,25 @@ ashita.events.register('d3d_present', 'present_cb', function ()
                         end
                     end
                 end
+            elseif bossTargeted and #axWeakness.roster > 0 then
+                -- No window standing: who opens with what, who closes with
+                -- what, from the weapon skills the herald listed per member.
+                local pairings = axPairings();
+                if #pairings == 0 then
+                    imgui.TextDisabled('No two listed weapon skills form a breaking chain.');
+                end
+                local shown = 0;
+                for _, entry in pairs(pairings) do
+                    if shown >= 12 then
+                        imgui.TextDisabled(('... and %d more'):fmt(#pairings - shown));
+                        break;
+                    end
+                    axDrawPairing(entry);
+                    shown = shown + 1;
+                end
             elseif bossTargeted then
-                -- No window standing: what the player can open or close
+                -- The herald's roster lines never arrived (addon loaded after
+                -- the engage): what the player alone can open or close
                 -- toward the weakness, and what a partner must bring.
                 local openers, closers = axSuggestions();
                 if #openers == 0 and #closers == 0 then
