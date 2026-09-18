@@ -39,6 +39,24 @@ local settings = require('settings');
 local skills = require('skills');
 
 --=============================================================================
+-- Scale the text itself, not the box around it.
+--
+-- /chains scale used to widen the window and leave the font alone, which only
+-- clipped the display at values below 1. These push a resized copy of the
+-- current font, the API Ashita 4.30 exposes (IGuiManager.PushFont(font,
+-- font_size_base_unscaled); nil takes the current font). Every push must be
+-- popped in the same frame or the font stack leaks into other addons.
+---@param scale number multiplier on the current font size
+--=============================================================================
+local function PushScaledFont(scale)
+    imgui.PushFont(nil, imgui.GetFontSize() * scale);
+end
+
+local function PopScaledFont()
+    imgui.PopFont();
+end
+
+--=============================================================================
 -- Addon Variables
 --=============================================================================
 local default_settings = T{
@@ -1064,8 +1082,12 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             ImGuiWindowFlags_NoNav)
 
         imgui.SetNextWindowBgAlpha(0.8)
-        imgui.SetNextWindowSize({ 350 * chains.settings.font_scale, -1 }, ImGuiCond_Always)
-        imgui.SetNextWindowSizeConstraints({ -1, -1 }, { FLT_MAX, FLT_MAX })
+
+        -- The font is pushed before Begin so the window's own auto-resize
+        -- measures the scaled text: 350 is a minimum width, not a fixed one,
+        -- so a larger font widens the box instead of being cut off by it.
+        PushScaledFont(chains.settings.font_scale);
+        imgui.SetNextWindowSizeConstraints({ 350 * chains.settings.font_scale, -1 }, { FLT_MAX, FLT_MAX })
 
         if chains.position then
             imgui.SetNextWindowPos({ chains.position.x, chains.position.y }, ImGuiCond_Always, { 0, 0 });
@@ -1076,8 +1098,6 @@ ashita.events.register('d3d_present', 'present_cb', function ()
         if (imgui.Begin('chains', true, flags)) then
 
             if render then
-                --imgui.SetWindowFontScale(chains.settings.font_scale)
-
                 local timediff = now-targetTable[targetId].ts;
                 local timer = targetTable[targetId].dur-timediff;
 
@@ -1142,7 +1162,6 @@ ashita.events.register('d3d_present', 'present_cb', function ()
                     end
                 end
             elseif chains.visible then
-                --imgui.SetWindowFontScale(chains.settings.font_scale)
                 imgui.Text('');
                 imgui.Text('                 --- Chains ---                 ');
                 imgui.Text('         Click and drag to move display         ');
@@ -1157,6 +1176,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             chains.settings.position_x, chains.settings.position_y = imgui.GetWindowPos();
         end
         imgui.End();
+        PopScaledFont();
     end
 
 end);
@@ -1211,7 +1231,7 @@ ashita.events.register('command', 'command_cb', function (e)
 
     if (#args == 3) and (args[2] == 'scale') then
         chains.settings.font_scale = args[3]:number();
-        print(chat.header(addon.name):append(chat.message('Font scale set to %s'):fmt(chains.settings.font_scale)));
+        print(chat.header(addon.name):append(chat.message('Text scale set to %s (the window grows to fit)'):fmt(chains.settings.font_scale)));
     end
 
     if (#args == 4) and (args[2] == 'move') then

@@ -73,9 +73,19 @@ after you armed it.
 that reuses the Immanence effect, so a Red Mage main holding it now gets the
 element list that was previously shown to Scholars only.
 
-Nothing else is changed, and neither change does anything on a retail-rules
-server: the Formless Fists effect id is never sent, and no other server hands
-a Red Mage Immanence.
+**Text scale (`/chains scale`).** Upstream's scale command multiplied the
+window's width and left the font alone, so a value below 1 clipped the
+display instead of shrinking it, and a value above 1 only padded it. It now
+scales the text: the window auto-sizes to the scaled content and treats
+350 x scale as a minimum width, so bigger text widens the box rather than
+being cut off by it. The idea came from a request raised on NerfOnline's
+Horizon fork of this addon; the implementation here is our own, and none of
+that fork's data is used - its skillchain properties are rebalanced for
+HorizonXI and disagree with retail on seventeen weapon skills.
+
+The two server-rules changes above do nothing on a retail-rules server: the
+Formless Fists effect id is never sent, and no other server hands a Red Mage
+Immanence.
 
 ## Acknowledgments
 All credit goes to Ivaar for the original skillchains implementation which was used as the tempalte for how to accomplish the desired results and how to deal with some of the corner cases.
