@@ -85,12 +85,14 @@ HorizonXI and disagree with retail on seventeen weapon skills.
 
 **Onslaught boss weakness.** When an Onslaught boss is engaged, the server
 draws a weakness and tells the party about it in chat. The fork does not read
-chat for it: while anything is targeted it asks the server every few seconds
-over the AscensionXI addon channel (packet 0x1E0, op 0x90, the same channel
-DLAC uses) and the server answers with the boss's id, the weak element, the
-procs already banked, and the working opener/closer pairs it computed from
-every present party member's usable weapon skills (players only - trusts are
-never on the roster). Those replies never reach the retail client.
+chat for it, and it does not poll: shortly after it loads, and again after
+every zone-in, it sends one request over the AscensionXI addon channel
+(packet 0x1E0, op 0x90, the same channel DLAC uses). That request subscribes
+you, and from then on the server pushes a snapshot whenever the fight's state
+changes: the boss's id, the weak element, the procs already banked, and the
+working opener/closer pairs it computed from every present party member's
+usable weapon skills (players only - trusts are never on the roster). Those
+frames never reach the retail client. `/chains refresh` asks again by hand.
 
 While the boss is targeted the fork opens a second window of its own (drag it
 where you want it; the position is saved) with the weakness and who opens with
@@ -110,7 +112,8 @@ wants. The window closes when the boss falls or you leave the zone; a wipe
 keeps it, because the server keeps the weakness.
 
 On a server that does not answer the op the fork stops asking until you
-change zones. `/chains debug` prints each snapshot as it arrives.
+change zones or `/chains refresh`. `/chains debug` prints each snapshot as it
+arrives.
 
 The three server-rules changes above do nothing on a retail-rules server: the
 Formless Fists effect id is never sent, no other server hands a Red Mage

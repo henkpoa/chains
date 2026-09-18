@@ -28,7 +28,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
-addon.version  = '1.0.1-axi6';
+addon.version  = '1.0.1-axi7';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -233,17 +233,21 @@ local axServer = {
     -- Spellchain reuses the effect.
     immanenceJobs = T{ 'SCH', 'RDM' },
 
-    -- Onslaught boss weakness, read from the server over the AscensionXI
+    -- Onslaught boss weakness, told by the server over the AscensionXI
     -- 0x1E0 addon channel, op 0x90: the same channel DLAC uses. The byte
     -- layout is modules/custom/lua/onslaught_wire.lua on the server; the
-    -- reader below mirrors it. No chat is involved, and the reply is
-    -- blocked from the retail client. Polled while anything is targeted.
+    -- reader below mirrors it. No chat is involved, and the frames are
+    -- blocked from the retail client. The addon asks ONCE -- shortly after
+    -- it loads, and again after every zone-in -- which subscribes the
+    -- character; from then on the server pushes a snapshot whenever the
+    -- fight's state changes. Nothing here runs on a timer.
     wire = T{
-        packet      = 0x1E0,
-        op          = 0x90,
-        version     = 1,
-        pollSeconds = 3,
-        status      = T{ OK = 0, BAD_OP = 1, MALFORMED = 2, BUSY = 3, UNAVAILABLE = 5, PROTO_UNSUPPORTED = 6 },
+        packet        = 0x1E0,
+        op            = 0x90,
+        version       = 1,
+        loadSeconds   = 2, -- ask this long after loading
+        zoneSeconds   = 5, -- and this long after a zone-in, once the zone has settled
+        status        = T{ OK = 0, BAD_OP = 1, MALFORMED = 2, BUSY = 3, UNAVAILABLE = 5, PROTO_UNSUPPORTED = 6 },
     },
 
     -- xi.skillchainType ids, under the names chainInfo uses. Light II and
@@ -266,9 +270,10 @@ local axServer = {
 -- Replaced by every reply, cleared by an inactive reply or a zone change.
 local axWeakness = nil;
 
--- The poll: one request in flight at a time, a fresh token each, and a
--- stop flag for a server that answers BAD_OP or UNAVAILABLE (until zoning).
-local axWire = T{ seq = 0, token = 0, nextPoll = 0, stopped = false };
+-- The one request: `due` is when to send it (nil = nothing owed), a fresh
+-- token each, and a stop flag for a server that answers BAD_OP or
+-- UNAVAILABLE (cleared by zoning or /chains refresh).
+local axWire = T{ seq = 0, token = 0, due = nil, stopped = false };
 
 -- Defined with the other Onslaught helpers further down; declared here
 -- because GetSkillchains calls it. A plain `local function` there would
@@ -946,19 +951,13 @@ local function axRequest()
     });
 end
 
--- Ask while anything is targeted; the window only ever shows on the boss,
--- and the answer for anything else is a cheap inactive snapshot.
-local function axPoll(now)
-    if axWire.stopped or now < axWire.nextPoll then
+-- Send the one owed request once its time has come.
+local function axRequestWhenDue(now)
+    if axWire.stopped or axWire.due == nil or now < axWire.due then
         return;
     end
 
-    local targetId = AshitaCore:GetMemoryManager():GetTarget():GetServerId(0);
-    if targetId == nil or targetId == 0 then
-        return;
-    end
-
-    axWire.nextPoll = now + axServer.wire.pollSeconds;
+    axWire.due = nil;
     axRequest();
 end
 
@@ -991,8 +990,9 @@ local function axOnWirePacket(e)
         return;
     end
 
+    -- Token 0 is a push; anything else must be the answer to our request.
     local snap = axDecode(data:sub(9));
-    if snap == nil or snap.token ~= axWire.token then
+    if snap == nil or (snap.token ~= 0 and snap.token ~= axWire.token) then
         return;
     end
 
@@ -1258,6 +1258,11 @@ end
 --=============================================================================
 ashita.events.register('load', 'load_cb', function ()
     playerID = AshitaCore:GetMemoryManager():GetParty():GetMemberServerId(0);
+
+    -- AscensionXI: loaded while logged in (a reload mid-fight): ask once.
+    if playerID ~= nil and playerID ~= 0 then
+        axWire.due = os.time() + axServer.wire.loadSeconds;
+    end
 end);
 
 --=============================================================================
@@ -1437,7 +1442,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
     elseif e.id == 0x0A then
         axWeakness = nil;
         axWire.stopped = false;
-        axWire.nextPoll = os.time() + 5;
+        axWire.due = os.time() + axServer.wire.zoneSeconds;
 
     -- Action Message - Clear buff when getting '206 - ${target}'s ${status} effect wears off'.
     --  only works to clear local player
@@ -1508,8 +1513,8 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     -- Capture current time for comparison
     local now = os.time();
 
-    -- AscensionXI: keep the Onslaught snapshot fresh.
-    axPoll(now);
+    -- AscensionXI: the one Onslaught request, when one is owed.
+    axRequestWhenDue(now);
 
     -- Remove stale playerTable entries
     for pk,pv in pairs(playerTable) do
@@ -1746,6 +1751,15 @@ ashita.events.register('command', 'command_cb', function (e)
     if (#args == 2) and (args[2] == 'debug') then
         chains.debug = not chains.debug;
         print(chat.header(addon.name):append(chat.message('%s: %s'):fmt(args[2], chains.debug and 'on' or 'off')));
+    end
+
+    --========================================================================
+    -- AscensionXI: ask the server again for the Onslaught state.
+    --========================================================================
+    if (#args == 2) and (args[2] == 'refresh') then
+        axWire.stopped = false;
+        axWire.due = os.time();
+        print(chat.header(addon.name):append(chat.message('Asking the server for the Onslaught state')));
     end
 
     --========================================================================
