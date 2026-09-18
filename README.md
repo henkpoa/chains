@@ -83,46 +83,38 @@ Horizon fork of this addon; the implementation here is our own, and none of
 that fork's data is used - its skillchain properties are rebalanced for
 HorizonXI and disagree with retail on seventeen weapon skills.
 
-**Onslaught boss weakness.** When an Onslaught boss is engaged, the server's
-herald tells the party which element the boss is weak to and which
-skillchains carry it, as a chat line:
+**Onslaught boss weakness.** When an Onslaught boss is engaged, the server
+draws a weakness and tells the party about it in chat. The fork does not read
+chat for it: while anything is targeted it asks the server every few seconds
+over the AscensionXI addon channel (packet 0x1E0, op 0x90, the same channel
+DLAC uses) and the server answers with the boss's id, the weak element, the
+procs already banked, and the working opener/closer pairs it computed from
+every present party member's usable weapon skills (players only - trusts are
+never on the roster). Those replies never reach the retail client.
 
-    Hajwaj's aura wavers before fire! A Liquefaction, Fusion or Light skillchain will break it.
-
-followed by one line per party member present, listing the weapon skills the
-server credited them with at the synced level (players only - trusts are never
-on the roster):
-
-    Abraxis can bring: Combo, Raging Fists, Spinning Attack.
-
-The fork reads those lines and, while the boss is targeted, opens a second
-window of its own (drag it where you want it; the position is saved) with
-the weakness and who opens with what and who closes with what to break it:
+While the boss is targeted the fork opens a second window of its own (drag it
+where you want it; the position is saved) with the weakness and who opens with
+what and who closes with what to break it:
 
     Fallen: Wasp Sting  >  Abraxis: Raging Fists  =  Liquefaction
 
 Pairs you are part of come first, then pairs between two others, then
-self-chains; higher chains first within each. If the roster lines never
-arrived (the addon was loaded after the boss was engaged) it falls back to
-what you alone can contribute: the weapon skills you can open with and the
-closer property a partner then needs, and the ones you can close with and the
-opener property that must be standing. The ordinary chains window is
-unchanged except that, on the boss, the results that break the weakness are
-listed first and marked, and the rest are greyed out - they are still real
-skillchains, just not the one the boss wants.
-The server's rule is applied as written: a landed chain breaks the weakness
-when it bursts on every announced element, so a Fusion or a Light answers a
-fire weakness. The proc lines ("Skillchain! +10 points") mark that credit as
-banked, and "The boss falls!" or a zone change clears the panel. A wipe does
-not: the server keeps the weakness through a re-engage, and so does the addon.
+self-chains; higher chains first within each. If the server found no pair on
+the present roster the window falls back to what you alone can contribute:
+the weapon skills you can open with and the closer property a partner then
+needs, and the ones you can close with and the opener property that must be
+standing. The ordinary chains window is unchanged except that, on the boss,
+the results that break the weakness are listed first and marked, and the rest
+are greyed out - they are still real skillchains, just not the one the boss
+wants. The window closes when the boss falls or you leave the zone; a wipe
+keeps it, because the server keeps the weakness.
 
-`/chains weakness fire Liquefaction,Fusion,Light` sets a weakness on your
-current target by hand, for looking at the panel outside a run;
-`/chains weakness off` clears it.
+On a server that does not answer the op the fork stops asking until you
+change zones. `/chains debug` prints each snapshot as it arrives.
 
 The three server-rules changes above do nothing on a retail-rules server: the
 Formless Fists effect id is never sent, no other server hands a Red Mage
-Immanence, and no other server's chat carries the herald's lines.
+Immanence, and no other server answers the Onslaught op.
 
 ## Acknowledgments
 All credit goes to Ivaar for the original skillchains implementation which was used as the tempalte for how to accomplish the desired results and how to deal with some of the corner cases.

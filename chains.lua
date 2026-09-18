@@ -28,7 +28,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
-addon.version  = '1.0.1-axi5';
+addon.version  = '1.0.1-axi6';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -233,42 +233,42 @@ local axServer = {
     -- Spellchain reuses the effect.
     immanenceJobs = T{ 'SCH', 'RDM' },
 
-    -- Onslaught boss weakness. The herald announces it once per boss as a
-    -- chat line; these patterns are the contract with
-    -- modules/custom/lua/onslaught.lua (announceWeakness, announceProcCredit).
-    -- Chat colour bytes are stripped before matching, and the herald's
-    -- "[Ghelsba Herald] " prefix is cut from the boss capture.
-    weaknessLine   = "(.-)'s aura wavers before (.-)!",
-    weaknessChains = 'A (.-) skillchain will break it%.',
-    procLines = T{
-        { pattern = 'Skillchain! %+%d+ points',     proc = 'skillchain' },
-        { pattern = 'Magic burst! %+%d+ points',    proc = 'magicBurst' },
-        { pattern = 'The boss falls! %+%d+ points', proc = 'kill' },
+    -- Onslaught boss weakness, read from the server over the AscensionXI
+    -- 0x1E0 addon channel, op 0x90: the same channel DLAC uses. The byte
+    -- layout is modules/custom/lua/onslaught_wire.lua on the server; the
+    -- reader below mirrors it. No chat is involved, and the reply is
+    -- blocked from the retail client. Polled while anything is targeted.
+    wire = T{
+        packet      = 0x1E0,
+        op          = 0x90,
+        version     = 1,
+        pollSeconds = 3,
+        status      = T{ OK = 0, BAD_OP = 1, MALFORMED = 2, BUSY = 3, UNAVAILABLE = 5, PROTO_UNSUPPORTED = 6 },
     },
 
-    -- After the weakness, one line per present roster member with the weapon
-    -- skills the server computed they can use at the synced level:
-    --   "Abraxis can bring: Combo, Raging Fists, Spinning Attack."
-    -- Trusts are never listed; the roster is players only.
-    rosterLine = '(.-) can bring: (.-)%.',
-
-    -- The herald's lower-case element words, as the addon spells them.
-    elementWords = T{
-        fire = 'Fire', ice = 'Ice', wind = 'Wind', earth = 'Earth',
-        lightning = 'Lightning', water = 'Water', light = 'Light', dark = 'Dark',
+    -- xi.skillchainType ids, under the names chainInfo uses. Light II and
+    -- Darkness II fold into their level-3 names, which burst the same.
+    chainNames = T{
+        [1] = 'Transfixion', [2] = 'Compression', [3] = 'Liquefaction', [4] = 'Scission',
+        [5] = 'Reverberation', [6] = 'Detonation', [7] = 'Induration', [8] = 'Impaction',
+        [9] = 'Gravitation', [10] = 'Distortion', [11] = 'Fusion', [12] = 'Fragmentation',
+        [13] = 'Light', [14] = 'Darkness', [15] = 'Light', [16] = 'Darkness',
     },
 };
 
--- The announced weakness of the boss this party is fighting, or nil.
---   boss     the boss's name as the herald said it
---   elements the announced elements, addon spelling ('Fire', 'Lightning', ...)
---   chains   the chain names the herald listed
+-- The boss weakness the server last reported, or nil.
+--   bossId   the boss's server id; the window shows while it is targeted
+--   boss     its name, read off the target the first time it is matched
+--   elements the weakness elements, addon spelling ('Fire', 'Dark', ...)
+--   chains   every chain that breaks it, ascending
 --   procs    which of the once-per-boss procs the party has already earned
---   roster   { { name = 'Abraxis', skills = T{ <skills[3] entries> } }, ... }
---            in the order the herald listed them; empty until the lines come
--- Cleared when the boss falls or the player changes zone; a re-engage after
--- a wipe keeps it, because the server keeps it too.
+--   pairs    who opens with what, who closes with what, in the server's order
+-- Replaced by every reply, cleared by an inactive reply or a zone change.
 local axWeakness = nil;
+
+-- The poll: one request in flight at a time, a fresh token each, and a
+-- stop flag for a server that answers BAD_OP or UNAVAILABLE (until zoning).
+local axWire = T{ seq = 0, token = 0, nextPoll = 0, stopped = false };
 
 -- Defined with the other Onslaught helpers further down; declared here
 -- because GetSkillchains calls it. A plain `local function` there would
@@ -767,24 +767,6 @@ end
 -- AscensionXI: Onslaught boss weakness.
 --=============================================================================
 
--- Chat lines carry colour and control bytes (0x1E/0x1F/0x7F plus one byte).
-local function axStripChat(s)
-    return (s:gsub('[\30\31\127].', ''):gsub('[\r\n]', ' '));
-end
-
--- "fire, wind, lightning and light" / "Liquefaction, Fusion or Light" -> list
-local function axSplitList(s)
-    local out = T{};
-    s = s:gsub(' and ', ', '):gsub(' or ', ', ');
-    for word in s:gmatch('[^,]+') do
-        word = word:match('^%s*(.-)%s*$');
-        if #word > 0 then
-            out:append(word);
-        end
-    end
-    return out;
-end
-
 -- The name a chain result is displayed and looked up under. The server folds
 -- "Light II" and "Darkness II" into their level-3 names for the announcement,
 -- and this table only knows the level-3 names anyway.
@@ -818,160 +800,203 @@ axChainAnswers = function(resultName)
     return true;
 end
 
-local function axSetWeakness(boss, elements, chainList)
+local function axU16(data, offset)
+    return data:byte(offset + 1) + data:byte(offset + 2) * 256;
+end
+
+local function axU32(data, offset)
+    return axU16(data, offset) + axU16(data, offset + 2) * 65536;
+end
+
+-- The reply payload (after the 8-byte envelope), as onslaught_wire.lua lays
+-- it out: 20-byte header, length-prefixed names, 8-byte pairs. Returns nil
+-- for anything short or of another version rather than half a snapshot.
+local function axDecode(payload)
+    if type(payload) ~= 'string' or #payload < 20 or axU16(payload, 0) ~= axServer.wire.version then
+        return nil;
+    end
+
+    local snap = {
+        token    = axU32(payload, 4),
+        bossId   = axU32(payload, 8),
+        active   = payload:byte(13) == 1,
+        weakness = payload:byte(14),
+        procs    = {},
+        names    = {},
+        pairs    = {},
+    };
+
+    local bits = payload:byte(15);
+    snap.procs.skillchain = bits % 2 == 1;
+    snap.procs.magicBurst = math.floor(bits / 2) % 2 == 1;
+    snap.procs.kill       = math.floor(bits / 4) % 2 == 1;
+
+    local nameCount = payload:byte(16);
+    local pairCount = payload:byte(17);
+    local offset    = 20;
+
+    for _ = 1, nameCount do
+        local length = payload:byte(offset + 1);
+        if length == nil or #payload < offset + 1 + length then
+            return nil;
+        end
+        table.insert(snap.names, payload:sub(offset + 2, offset + 1 + length));
+        offset = offset + 1 + length;
+    end
+
+    if #payload < offset + pairCount * 8 then
+        return nil;
+    end
+
+    for _ = 1, pairCount do
+        table.insert(snap.pairs, {
+            openerWs = axU16(payload, offset),
+            closerWs = axU16(payload, offset + 2),
+            chain    = payload:byte(offset + 5),
+            opener   = payload:byte(offset + 6),
+            closer   = payload:byte(offset + 7),
+        });
+        offset = offset + 8;
+    end
+
+    return snap;
+end
+
+-- Turn a reply into the display state: elements and breaking chains come
+-- from chainInfo (the same burst table the server's rule reads), names from
+-- the reply, weapon skill names from skills[3].
+local function axApplySnapshot(snap)
+    local name = axServer.chainNames[snap.weakness];
+
+    if not snap.active or name == nil or chainInfo[name] == nil then
+        axWeakness = nil;
+        return;
+    end
+
+    local elements = T{};
+    for _, element in pairs(chainInfo[name].burst) do
+        elements:append(element == 'Darkness' and 'Dark' or element);
+    end
+
+    local breaking = T{};
+    for chainName, info in pairs(chainInfo) do
+        if chainName ~= 'Radiance' and chainName ~= 'Umbra' then
+            local bursts = T{};
+            for _, element in pairs(info.burst) do
+                bursts:append(element == 'Darkness' and 'Dark' or element);
+            end
+            local all = true;
+            for _, element in pairs(elements) do
+                if not bursts:contains(element) then all = false; end
+            end
+            if all then
+                breaking:append(chainName);
+            end
+        end
+    end
+    table.sort(breaking, function(a, b)
+        if chainInfo[a].level ~= chainInfo[b].level then
+            return chainInfo[a].level < chainInfo[b].level;
+        end
+        return a < b;
+    end);
+
+    local pairList = T{};
+    for _, pair in pairs(snap.pairs) do
+        local openSkill = skills[3][pair.openerWs];
+        local closeSkill = skills[3][pair.closerWs];
+        pairList:append({
+            opener     = snap.names[pair.opener] or '?',
+            openSkill  = openSkill and openSkill.en or ('WS ' .. pair.openerWs),
+            closer     = snap.names[pair.closer] or '?',
+            closeSkill = closeSkill and closeSkill.en or ('WS ' .. pair.closerWs),
+            result     = axServer.chainNames[pair.chain] or ('chain ' .. pair.chain),
+        });
+    end
+
     axWeakness = {
-        boss     = boss,
+        bossId   = snap.bossId,
+        boss     = (axWeakness and axWeakness.bossId == snap.bossId) and axWeakness.boss or nil,
         elements = elements,
-        chains   = chainList,
-        procs    = T{},
-        roster   = T{},
+        chains   = breaking,
+        procs    = snap.procs,
+        pairs    = pairList,
     };
 
     if chains.debug then
-        print(chat.header(addon.name):append(chat.message(('weakness: %s -> %s [%s]'):fmt(
-            boss, elements:concat(', '), chainList:concat(', ')))));
+        print(chat.header(addon.name):append(chat.message(('onslaught: boss %d weak to %s, %d pairs'):fmt(
+            snap.bossId, name, #pairList))));
     end
 end
 
--- Read the herald's line. Returns true when it was a weakness announcement.
-local function axParseWeakness(message)
-    local boss, elementText = message:match(axServer.weaknessLine);
-    if boss == nil then
-        return false;
-    end
+-- One request: 4 header bytes Ashita fills, the envelope (op, seq, 0, 0),
+-- then version, reserved and the token.
+local function axRequest()
+    axWire.seq   = (axWire.seq % 255) + 1;
+    axWire.token = math.random(1, 0x7FFFFFFF);
 
-    -- Cut the "[Ghelsba Herald] " the client prints before a named line.
-    boss = boss:gsub('^.*[%]:]%s*', '');
+    local t = axWire.token;
+    local v = axServer.wire.version;
 
-    local elements = T{};
-    local chainList = T{};
-
-    local chainText = message:match(axServer.weaknessChains);
-    if chainText then
-        for _, word in pairs(axSplitList(elementText)) do
-            elements:append(axServer.elementWords[word:lower()] or word);
-        end
-        chainList = axSplitList(chainText);
-    elseif chainInfo[axChainKey(elementText)] then
-        -- The older one-name shape names the chain itself; its burst elements
-        -- are the weakness.
-        elements = T(chainInfo[axChainKey(elementText)].burst);
-        chainList = T{ elementText };
-    else
-        return false;
-    end
-
-    if #elements == 0 then
-        return false;
-    end
-
-    axSetWeakness(boss, elements, chainList);
-    return true;
+    AshitaCore:GetPacketManager():AddOutgoingPacket(axServer.wire.packet, {
+        0, 0, 0, 0,
+        axServer.wire.op, axWire.seq, 0, 0,
+        v % 256, math.floor(v / 256), 0, 0,
+        t % 256, math.floor(t / 256) % 256, math.floor(t / 65536) % 256, math.floor(t / 16777216) % 256,
+    });
 end
 
--- skills[3] entry by name, spelling-insensitive: the herald prints the
--- server's row name ("Ascetic's Fury" from ascetics_fury), the table has
--- the client's.
-local axSkillByName = nil;
-local function axFindSkill(name)
-    if axSkillByName == nil then
-        axSkillByName = {};
-        for id, entry in pairs(skills[3]) do
-            axSkillByName[entry.en:lower():gsub('[^%a]', '')] = entry;
-        end
+-- Ask while anything is targeted; the window only ever shows on the boss,
+-- and the answer for anything else is a cheap inactive snapshot.
+local function axPoll(now)
+    if axWire.stopped or now < axWire.nextPoll then
+        return;
     end
-    return axSkillByName[name:lower():gsub('[^%a]', '')];
+
+    local targetId = AshitaCore:GetMemoryManager():GetTarget():GetServerId(0);
+    if targetId == nil or targetId == 0 then
+        return;
+    end
+
+    axWire.nextPoll = now + axServer.wire.pollSeconds;
+    axRequest();
 end
 
--- Read a "<name> can bring: A, B, C." line. Returns true when it was one.
--- Lines for a member already listed replace that member's skills.
-local function axParseRoster(message)
-    if axWeakness == nil then
-        return false;
+-- An incoming 0x1E0 frame. Only our partition is read and blocked; the
+-- void storage and gear vault ops pass through untouched.
+local function axOnWirePacket(e)
+    local data = e.data;
+    if type(data) ~= 'string' or #data < 8 then
+        return;
     end
 
-    local name, list = message:match(axServer.rosterLine);
-    if name == nil then
-        return false;
+    local op, seq, status = data:byte(5, 7);
+    if op < 0x90 or op > 0x9F then
+        return;
     end
 
-    name = name:gsub('^.*[%]:]%s*', '');
+    e.blocked = true;
 
-    local found = T{};
-    if list ~= 'nothing' then
-        for _, word in pairs(axSplitList(list)) do
-            local entry = axFindSkill(word);
-            if entry then
-                found:append(entry);
-            elseif chains.debug then
-                print(chat.header(addon.name):append(chat.error(('roster: unknown weapon skill "%s"'):fmt(word))));
-            end
+    if status == axServer.wire.status.BUSY then
+        return;
+    end
+
+    if status ~= axServer.wire.status.OK then
+        -- Not this server, or the module is not loaded: stop asking until
+        -- the next zone.
+        axWire.stopped = true;
+        if chains.debug then
+            print(chat.header(addon.name):append(chat.error(('onslaught: status %d, polling stopped'):fmt(status))));
         end
+        return;
     end
 
-    for _, member in pairs(axWeakness.roster) do
-        if member.name == name then
-            member.skills = found;
-            return true;
-        end
+    local snap = axDecode(data:sub(9));
+    if snap == nil or snap.token ~= axWire.token then
+        return;
     end
 
-    axWeakness.roster:append({ name = name, skills = found });
-    return true;
-end
-
--- Every (opener member, closer member, result) that breaks the weakness,
--- one representative weapon-skill pair each. Pairs the local player is in
--- come first, then pairs between two others, then self-chains; within a
--- group the higher result first.
-local function axPairings()
-    local me = GetPlayer().Name;
-    local out = T{};
-    local seen = T{};
-
-    for _, opener in pairs(axWeakness.roster) do
-        for _, closer in pairs(axWeakness.roster) do
-            for _, openSkill in pairs(opener.skills) do
-                for _, closeSkill in pairs(closer.skills) do
-                    -- The engine's walk: opener's properties in order against
-                    -- the closer's, first match wins.
-                    local match = nil;
-                    for _, p1 in pairs(openSkill.skillchain) do
-                        for _, p2 in pairs(closeSkill.skillchain) do
-                            match = chainInfo[p1] and chainInfo[p1][p2];
-                            if match then break end
-                        end
-                        if match then break end
-                    end
-
-                    if match and axChainAnswers(match.skillchain) then
-                        local key = opener.name .. '|' .. closer.name .. '|' .. match.skillchain;
-                        if not seen[key] then
-                            seen[key] = true;
-                            local group = 3;
-                            if opener.name ~= closer.name then
-                                group = (opener.name == me or closer.name == me) and 1 or 2;
-                            end
-                            out:append({
-                                opener = opener.name, openSkill = openSkill.en,
-                                closer = closer.name, closeSkill = closeSkill.en,
-                                result = match.skillchain, level = match.level, group = group,
-                            });
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    table.sort(out, function(a, b)
-        if a.group ~= b.group then return a.group < b.group end
-        if a.level ~= b.level then return a.level > b.level end
-        if a.opener ~= b.opener then return a.opener < b.opener end
-        return a.closer < b.closer;
-    end);
-
-    return out;
+    axApplySnapshot(snap);
 end
 
 -- "Fallen: Wasp Sting  >  Abraxis: Raging Fists  =  Liquefaction"
@@ -981,19 +1006,23 @@ local function axDrawPairing(entry)
     imgui.TextColored(GetPropertyColor(entry.result), entry.result);
 end
 
--- True while the player targets the boss the weakness belongs to.
+-- True while the player targets the boss the weakness belongs to. The name
+-- for the header is read off the target here, the only place it is known.
 local function axTargetIsBoss()
     if axWeakness == nil then
         return false;
     end
 
-    local index = AshitaCore:GetMemoryManager():GetTarget():GetTargetIndex(0);
-    if index == nil or index == 0 then
+    local target = AshitaCore:GetMemoryManager():GetTarget();
+    if target:GetServerId(0) ~= axWeakness.bossId then
         return false;
     end
 
-    local name = AshitaCore:GetMemoryManager():GetEntity():GetName(index);
-    return name ~= nil and name:lower() == axWeakness.boss:lower();
+    if axWeakness.boss == nil then
+        axWeakness.boss = AshitaCore:GetMemoryManager():GetEntity():GetName(target:GetTargetIndex(0)) or 'The boss';
+    end
+
+    return true;
 end
 
 -- Every property a chain can be continued with, from chainInfo's shape:
@@ -1100,7 +1129,7 @@ end
 -- The weakness header: boss, elements, the chains that break it, and which
 -- procs are already banked.
 local function axDrawWeaknessHeader()
-    imgui.Text(('%s wavers before'):fmt(axWeakness.boss));
+    imgui.Text(('%s wavers before'):fmt(axWeakness.boss or 'The boss'));
     for k, element in pairs(axWeakness.elements) do
         if k > 1 then
             imgui.SameLine(0, 0);
@@ -1399,9 +1428,16 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             playerTable[actor][targetAction.Param] = os.time() + ChainBuffTypes[targetAction.Param].duration;
         end
 
-    -- AscensionXI: a zone change ends any Onslaught boss fight.
+    -- AscensionXI: the Onslaught reply.
+    elseif e.id == axServer.wire.packet then
+        axOnWirePacket(e);
+
+    -- AscensionXI: a zone change ends any Onslaught boss fight, and a server
+    -- that refused the op gets asked again.
     elseif e.id == 0x0A then
         axWeakness = nil;
+        axWire.stopped = false;
+        axWire.nextPoll = os.time() + 5;
 
     -- Action Message - Clear buff when getting '206 - ${target}'s ${status} effect wears off'.
     --  only works to clear local player
@@ -1464,33 +1500,6 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
 end);
 
 --=============================================================================
--- event: text_in
--- desc: AscensionXI - the Onslaught herald's weakness and proc lines.
---=============================================================================
-ashita.events.register('text_in', 'text_in_cb', function (e)
-    local message = axStripChat(e.message);
-
-    if axParseWeakness(message) or axParseRoster(message) then
-        return;
-    end
-
-    if axWeakness == nil then
-        return;
-    end
-
-    for _, line in pairs(axServer.procLines) do
-        if message:find(line.pattern) then
-            if line.proc == 'kill' then
-                axWeakness = nil;
-            else
-                axWeakness.procs[line.proc] = true;
-            end
-            return;
-        end
-    end
-end);
-
---=============================================================================
 -- event: d3d_present
 -- desc: Event called when the Direct3D device is presenting a scene.
 --=============================================================================
@@ -1498,6 +1507,9 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
     -- Capture current time for comparison
     local now = os.time();
+
+    -- AscensionXI: keep the Onslaught snapshot fresh.
+    axPoll(now);
 
     -- Remove stale playerTable entries
     for pk,pv in pairs(playerTable) do
@@ -1665,26 +1677,22 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             axDrawWeaknessHeader();
             imgui.Separator();
 
-            if #axWeakness.roster > 0 then
-                -- Who opens with what, who closes with what, from the weapon
-                -- skills the herald listed per member.
-                local pairings = axPairings();
-                if #pairings == 0 then
-                    imgui.TextDisabled('No two listed weapon skills form a breaking chain.');
-                end
+            if #axWeakness.pairs > 0 then
+                -- Who opens with what, who closes with what: the server's
+                -- list, in the server's order (your pairs first).
                 local shown = 0;
-                for _, entry in pairs(pairings) do
+                for _, entry in pairs(axWeakness.pairs) do
                     if shown >= 12 then
-                        imgui.TextDisabled(('... and %d more'):fmt(#pairings - shown));
+                        imgui.TextDisabled(('... and %d more'):fmt(#axWeakness.pairs - shown));
                         break;
                     end
                     axDrawPairing(entry);
                     shown = shown + 1;
                 end
             else
-                -- The herald's roster lines never arrived (addon loaded after
-                -- the engage): what the player alone can open or close
-                -- toward the weakness, and what a partner must bring.
+                -- The server found no pair on the present roster: what the
+                -- player alone can open or close toward the weakness, and
+                -- what a partner would have to bring.
                 local openers, closers = axSuggestions();
                 if #openers == 0 and #closers == 0 then
                     imgui.TextDisabled('None of your weapon skills can take part.');
@@ -1738,30 +1746,6 @@ ashita.events.register('command', 'command_cb', function (e)
     if (#args == 2) and (args[2] == 'debug') then
         chains.debug = not chains.debug;
         print(chat.header(addon.name):append(chat.message('%s: %s'):fmt(args[2], chains.debug and 'on' or 'off')));
-    end
-
-    --========================================================================
-    -- AscensionXI: set or clear a boss weakness by hand, for testing the
-    -- panel outside a run. The boss is whatever is targeted.
-    --   /chains weakness fire Liquefaction,Fusion,Light
-    --   /chains weakness off
-    --========================================================================
-    if (#args == 3) and (args[2] == 'weakness') and (args[3] == 'off') then
-        axWeakness = nil;
-        print(chat.header(addon.name):append(chat.message('Weakness cleared')));
-    elseif (#args >= 3) and (args[2] == 'weakness') then
-        local index = AshitaCore:GetMemoryManager():GetTarget():GetTargetIndex(0);
-        local boss = index and index ~= 0 and AshitaCore:GetMemoryManager():GetEntity():GetName(index) or nil;
-        if boss == nil then
-            print(chat.header(addon.name):append(chat.error('Target the boss first.')));
-        else
-            local elements = T{};
-            for _, word in pairs(axSplitList(args[3])) do
-                elements:append(axServer.elementWords[word:lower()] or word);
-            end
-            axSetWeakness(boss, elements, args[4] and axSplitList(args[4]) or T{});
-            print(chat.header(addon.name):append(chat.message('Weakness set on %s: %s'):fmt(boss, elements:concat(', '))));
-        end
     end
 
     --========================================================================
