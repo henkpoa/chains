@@ -100,8 +100,9 @@ what and who closes with what to break it:
 
     Fallen: Wasp Sting  >  Abraxis: Raging Fists  =  Liquefaction
 
-Pairs you are part of come first, then pairs between two others, then
-self-chains; higher chains first within each. If the server found no pair on
+Pairs you are part of come first, then pairs between two others; higher
+chains first within each. Your own two weapon skills are never listed as a
+pair - the list is what the party has to coordinate. If the server found no pair on
 the present roster the window falls back to what you alone can contribute:
 the weapon skills you can open with and the closer property a partner then
 needs, and the ones you can close with and the opener property that must be

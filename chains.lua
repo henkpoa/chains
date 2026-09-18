@@ -28,7 +28,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Ivaar (creator) - Sippius - MultiFr3d - AscensionXI';
-addon.version  = '1.0.1-axi7';
+addon.version  = '1.0.1-axi8';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -1684,7 +1684,8 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
             if #axWeakness.pairs > 0 then
                 -- Who opens with what, who closes with what: the server's
-                -- list, in the server's order (your pairs first).
+                -- list, in the server's order (your pairs first, never a
+                -- solo self-chain).
                 local shown = 0;
                 for _, entry in pairs(axWeakness.pairs) do
                     if shown >= 12 then
